@@ -1,0 +1,280 @@
+---
+title: "MCMC"
+author: "Matej Kalc"
+date: '2022-05-18'
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Libraries
+```{r}
+if (!require("mcmcse", character.only = TRUE)) {
+    install.packages("mcmcse")
+}
+set.seed(0)
+library("MASS")
+library("ggplot2")
+library("mnormt")
+library('pracma')
+library("mcmcse")
+```
+
+## Data
+```{r}
+data_log_reg <- read.csv('./datset.csv')
+```
+
+
+## Metropolis-Hastings
+```{r}
+metropolis_hastings <- function(p, m, x_prev, covariance) {
+    n_dim <- length(x_prev)
+
+    x_i <- matrix(rep(0, n_dim * m), nrow = n_dim)
+
+    for(i in 1:m) {
+        x_c <- mvrnorm(n = 1, mu = x_prev, Sigma = covariance)
+        alpha <- min(1, p(x_c) / p(x_prev))
+        u <- runif(1)
+        if(u <= alpha){
+          x_i[,i] <- x_c
+          x_prev <- x_c
+        } else {
+          x_i[,i] <- x_prev
+        }
+    }
+    return (x_i)
+}
+
+H <- function(U, q, p) {
+    U(q) + sum(p^2) / 2
+}
+
+hmc <- function(U, U_der, q_prev, eps, L, m) {
+    n_dim <- length(q_prev)
+
+    q_i <- matrix(rep(0, n_dim * m), nrow = n_dim)
+
+    for(i in 1:m) {
+        
+        p <- rnorm(length(q),0,1)
+        
+        p_t <- p
+        q_t <- q_prev
+        
+        p_t<-p_t-eps * U_der(q_t) / 2
+        
+        for(l in 1:L) { 
+            q_t <- q_t + eps * p_t
+
+            if (l!=L) p_t=p_t-eps * U_der(q_t)
+        }
+        
+        p_t=p_t-eps * U_der(q_t) / 2
+        
+        p_t=-p_t
+      current_U = U(q_prev)
+      current_K = sum(p^2) / 2
+      proposed_U = U(q_t)
+      proposed_K = sum(p_t^2) / 2
+        
+        
+        if(runif(1) <= exp(current_U-proposed_U+current_K-proposed_K)){
+          q_i[,i] <- q_t
+          q_prev <- q_t
+        } else {
+          q_i[,i] <- q_prev
+        }
+    }
+    return (q_i)
+}
+
+sample_M <- function(p, m, n_dim) {
+    biggest_ratio <- 0
+    for(i in 1:m) {
+        x <- rmnorm(1, rep(0, n_dim), diag(n_dim))
+        ratio <- p(x)/dmnorm(x, rep(0, n_dim),diag(n_dim))
+        if(ratio > biggest_ratio){
+            biggest_ratio <- ratio
+        }
+    }
+    return (biggest_ratio)
+}
+
+rejection_sampling <- function(p, C, M, m, n_dim) {
+    x_i <- matrix(rep(0, n_dim * m), nrow = n_dim)
+    for(i in 1:m) {
+        success <- FALSE
+        while(!success) {
+            y <- rmnorm(1, rep(0, n_dim), diag(n_dim))
+            success <- runif(1) <= (C * p(y) / (M * dmnorm(y, rep(0, n_dim),diag(n_dim))))
+        }
+        x_i[,i] <- y
+    }
+    return (x_i)
+}
+
+```
+
+
+## Scenarios
+```{r}
+biv <- function(x){
+    return (dmnorm(cbind(x[1], x[2]), c(0,0), matrix(c(1,0,0,1), nrow = 2)))
+}
+
+minus_log_biv <- function(x){
+    return (-1 * (log(biv(x))))
+}
+
+minus_log_biv_grad <- function(x) {
+    return (as.matrix(x))
+}
+
+B <- 0.05
+banana <- function(x) {
+  return (exp(-minus_logf(x)))
+}
+minus_logf <- function(x) {
+  -(-(x[1]^2)/200- 0.5 * (x[2]+ B * x[1]^2 - 100*B)^2 )
+}
+
+minus_logf_grad <- function(x) {
+  g1 <- -(x[1])/100- 1.0 * (2* B * x[1]) * (x[2]+ B * x[1]^2 - 100*B)
+  g2 <- - 1.0 * (x[2]+ B * x[1]^2 - 100*B)
+  -c(g1,g2)
+}
+
+S <- function(t) {
+    1 / (1 + exp(-t))
+}
+log_reg2 <- function(x) {
+    y <- data_log_reg$y
+    sigm <- S(as.matrix(data_log_reg[,1:2]) %*% as.matrix(x))
+    return (prod((sigm ** y) * ((1 - sigm) ** (1 - y))))
+}
+
+minus_log_log_reg2 <- function(x) {
+    return (-log(log_reg2(c(x[1], x[2]))))
+}
+
+minus_log_log_reg2_der <- function(x) {
+    a <- unname(as.matrix(data_log_reg[, names(data_log_reg) == "X1" | names(data_log_reg) == "X2"]))
+    y <- data_log_reg$y
+    reg <- t(x %*% t(a))
+    sigm <- S(reg)
+    
+    return (-t(t(a)%*% (y - sigm)))
+}
+
+log_reg <- function(x) {
+    y <- data_log_reg$y
+    reg <- as.matrix(data_log_reg[, names(data_log_reg) != "y"]) %*% as.matrix(x)
+    sigm <- S(reg)
+    return (prod((sigm ^ y) * ((1 - sigm) ^ (1 - y))))
+}
+
+minus_log_log_reg <- function(x) {
+    -log(log_reg(as.double(x)))
+}
+
+minus_log_reg_der <- function(x) {
+    a <- unname(as.matrix(data_log_reg[, names(data_log_reg) != "y"]))
+    y <- data_log_reg$y
+    reg <- t(x %*% t(a))
+    sigm <- S(reg)
+    return (-t((y - sigm)) %*% a)
+}
+
+```
+
+```{r}
+library(hash)
+
+number_of_samples <- 1000
+
+samples.mh.biv <- hash()
+samples.mh.banana <- hash()
+samples.mh.log_reg2 <- hash()
+samples.mh.log_reg <- hash()
+samples.hmc.biv <- hash()
+samples.hmc.banana <- hash()
+samples.hmc.log_reg2 <- hash()
+samples.hmc.log_reg <- hash()
+samples.rej.biv <- hash()
+samples.rej.banana <- hash()
+samples.rej.log_reg2 <- hash()
+samples.rej.log_reg <- hash()
+
+for(i in 1:5) {
+    
+    print(paste("Seed", i))
+    set.seed(i)
+    trial_run <- metropolis_hastings(biv,number_of_samples,c(0,0), diag(2))
+    samples.mh.biv[[as.character(i)]] <- metropolis_hastings(biv,number_of_samples,apply(trial_run, 1, mean), matrix(diag(apply(trial_run, 1, sd)),ncol=2))
+
+    trial_run <- metropolis_hastings(banana,number_of_samples,c(0,0), diag(2))
+    samples.mh.banana[[as.character(i)]] <- metropolis_hastings(banana,number_of_samples,apply(trial_run, 1, mean), matrix(diag(apply(trial_run, 1, sd)),ncol=2))
+
+    trial_run <- metropolis_hastings(log_reg2,number_of_samples,c(0,0), diag(2))
+    samples.mh.log_reg2[[as.character(i)]] <- metropolis_hastings(log_reg2,number_of_samples,apply(trial_run, 1, mean), matrix(diag(apply(trial_run, 1, sd)),ncol=2))
+
+    trial_run <- metropolis_hastings(log_reg,number_of_samples,rep(0, 11), diag(nrow=11))
+    samples.mh.log_reg[[as.character(i)]] <- metropolis_hastings(log_reg,number_of_samples,apply(trial_run, 1, mean), matrix(diag(apply(trial_run, 1, sd)),ncol=11))
+
+    number_of_Leapfrog_iterations <- 27
+    epsilon <- 0.1
+    trial_run <- hmc(minus_log_biv,minus_log_biv_grad, c(0,0), epsilon, number_of_Leapfrog_iterations, number_of_samples)
+    samples.hmc.biv[[as.character(i)]] <- hmc(minus_log_biv,minus_log_biv_grad, apply(trial_run, 1, mean), epsilon, number_of_Leapfrog_iterations, number_of_samples)
+
+    trial_run <- hmc(minus_logf,minus_logf_grad, c(0,0), 0.6, number_of_Leapfrog_iterations, number_of_samples)
+    samples.hmc.banana[[as.character(i)]] <- hmc(minus_logf,minus_logf_grad, apply(trial_run, 1, mean), 0.6, number_of_Leapfrog_iterations, number_of_samples)
+
+    epsilon <- 0.01
+    trial_run <- hmc(minus_log_log_reg2,minus_log_log_reg2_der, c(0,0), epsilon, number_of_Leapfrog_iterations, number_of_samples)
+    samples.hmc.log_reg2[[as.character(i)]] <- hmc(minus_log_log_reg2,minus_log_log_reg2_der, apply(trial_run, 1, mean), epsilon, number_of_Leapfrog_iterations, number_of_samples)
+
+    trial_run <- hmc(minus_log_log_reg,minus_log_reg_der, rep(0, 11), epsilon, number_of_Leapfrog_iterations, number_of_samples)
+    samples.hmc.log_reg[[as.character(i)]] <- hmc(minus_log_log_reg,minus_log_reg_der, apply(trial_run, 1, mean), epsilon, number_of_Leapfrog_iterations, number_of_samples)
+    
+    M <- sample_M(biv, number_of_samples, 2) + 1.0e-500
+    print(M)
+    samples.rej.biv[[as.character(i)]] <- rejection_sampling(biv,1, M, number_of_samples, 2)
+    
+    M <- sample_M(banana, number_of_samples, 2) + 1.0e-500
+    print(M)
+    samples.rej.banana[[as.character(i)]] <- rejection_sampling(banana,1, M, number_of_samples, 2)
+    
+    M <- sample_M(log_reg2, number_of_samples, 2) + 1.0e-500
+    print(M)
+    samples.rej.log_reg2[[as.character(i)]] <- rejection_sampling(log_reg2,1, M, number_of_samples, 2)
+    
+    M <- sample_M(log_reg, number_of_samples, 11) + 1.0e-300
+    print(M)
+    samples.rej.log_reg[[as.character(i)]] <- rejection_sampling(log_reg,1, M, number_of_samples, 11)
+}
+
+```
+
+
+
+
+
+```{r}
+diagnostics(samples.mh.biv)
+diagnostics(samples.hmc.biv)
+diagnostics(samples.rej.biv)
+diagnostics(samples.mh.banana)
+diagnostics(samples.hmc.banana)
+diagnostics(samples.rej.banana)
+diagnostics(samples.mh.log_reg2)
+diagnostics(samples.hmc.log_reg2)
+diagnostics(samples.rej.log_reg2)
+diagnostics(samples.mh.log_reg)
+diagnostics(samples.hmc.log_reg)
+diagnostics(samples.rej.log_reg)
+```
+
